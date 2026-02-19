@@ -13,7 +13,7 @@ vi.mock("../src/sdk.js", () => ({
 }));
 
 // Hoist all variables referenced inside vi.mock factories
-const { mockExtract, mockInject, mockSetSpan, mockSpans, createMockSpan } =
+const { mockExtract, mockInject, mockSpans, createMockSpan, activeCtxStack } =
   vi.hoisted(() => {
     type MockSpan = {
       name: string;
@@ -26,6 +26,8 @@ const { mockExtract, mockInject, mockSetSpan, mockSpans, createMockSpan } =
     };
 
     const spans: MockSpan[] = [];
+    // Stack to simulate context propagation via startActiveSpan
+    const ctxStack: unknown[] = [{ activeCtx: true }];
 
     return {
       mockExtract: vi.fn(
@@ -48,9 +50,6 @@ const { mockExtract, mockInject, mockSetSpan, mockSpans, createMockSpan } =
           }
         },
       ),
-      mockSetSpan: vi.fn(
-        (ctx: unknown, span: unknown) => ({ ...Object(ctx), __span: span }),
-      ),
       mockSpans: spans,
       createMockSpan: () => {
         const span: MockSpan = {
@@ -65,6 +64,7 @@ const { mockExtract, mockInject, mockSetSpan, mockSpans, createMockSpan } =
         spans.push(span);
         return span;
       },
+      activeCtxStack: ctxStack,
     };
   });
 
@@ -75,7 +75,7 @@ vi.mock("@opentelemetry/api", async () => {
     ROOT_CONTEXT: {},
     context: {
       ...(actual as Record<string, unknown>).context,
-      active: () => ({ activeCtx: true }),
+      active: () => activeCtxStack[activeCtxStack.length - 1],
     },
     propagation: {
       extract: mockExtract,
@@ -83,7 +83,7 @@ vi.mock("@opentelemetry/api", async () => {
     },
     trace: {
       getTracer: () => ({
-        startActiveSpan: (
+        startActiveSpan: async (
           name: string,
           opts: unknown,
           ctx: unknown,
@@ -94,10 +94,19 @@ vi.mock("@opentelemetry/api", async () => {
           span.name = name;
           span.opts = opts as Record<string, unknown>;
           span.parentCtx = typeof ctx === "function" ? undefined : ctx;
-          return (callback as (...args: unknown[]) => unknown)(span);
+          // Simulate context propagation: push new context with this span
+          const childCtx = { __span: span, __parent: ctx };
+          activeCtxStack.push(childCtx);
+          try {
+            return await (callback as (...args: unknown[]) => unknown)(span);
+          } finally {
+            activeCtxStack.pop();
+          }
         },
       }),
-      setSpan: mockSetSpan,
+      setSpan: vi.fn(
+        (ctx: unknown, span: unknown) => ({ ...Object(ctx), __span: span }),
+      ),
     },
   };
 });
@@ -148,6 +157,7 @@ describe("instrumentWorkflow", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockSpans.length = 0;
+    activeCtxStack.length = 1; // reset to base context
     _resetInstrumentState();
   });
 
@@ -424,7 +434,7 @@ describe("instrumentWorkflow", () => {
     expect(rootSpan!.end).toHaveBeenCalled();
   });
 
-  it("step spans are children of workflow.run span", async () => {
+  it("step spans are children of workflow.run via active context", async () => {
     const step = createMockStep();
 
     class TestWorkflow {
@@ -443,15 +453,38 @@ describe("instrumentWorkflow", () => {
     expect(rootSpan).toBeDefined();
     expect(childSpan).toBeDefined();
 
-    // trace.setSpan was called with (parentCtx, rootSpan) to create runCtx
-    expect(mockSetSpan).toHaveBeenCalledWith(
-      expect.anything(),
-      rootSpan,
-    );
+    // child-step's parentCtx should contain the workflow.run span
+    const parentCtx = childSpan!.parentCtx as Record<string, unknown>;
+    expect(parentCtx).toBeDefined();
+    expect(parentCtx.__span).toBe(rootSpan);
+  });
 
-    // child-step's parentCtx should be the runCtx (output of trace.setSpan)
-    const runCtx = mockSetSpan.mock.results[0]?.value;
-    expect(childSpan!.parentCtx).toBe(runCtx);
+  it("nested step.do spans become children of outer step span", async () => {
+    const step = createMockStep();
+
+    class TestWorkflow {
+      env = {};
+      async run(_event: unknown, step: Record<string, unknown>) {
+        await (step.do as CallableFunction)(
+          "outer",
+          async () =>
+            (step.do as CallableFunction)("inner", async () => "nested"),
+        );
+      }
+    }
+
+    const Decorated = applyDecorator(TestWorkflow, { serviceName: "wf" });
+    const instance = new Decorated();
+    await instance.run({ payload: {} }, step);
+
+    const outerSpan = mockSpans.find((s) => s.name === "outer");
+    const innerSpan = mockSpans.find((s) => s.name === "inner");
+    expect(outerSpan).toBeDefined();
+    expect(innerSpan).toBeDefined();
+
+    // inner's parentCtx should contain the outer span (not workflow.run)
+    const innerParent = innerSpan!.parentCtx as Record<string, unknown>;
+    expect(innerParent.__span).toBe(outerSpan);
   });
 
   it("root span records error when run() throws", async () => {

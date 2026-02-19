@@ -43,10 +43,10 @@ export type InstrumentWorkflowOptions = Omit<
 >;
 
 /**
- * Run `fn` inside a new span, recording errors and ending the span automatically.
+ * Run `fn` inside a new span that is a child of the current active context.
+ * Records errors and ends the span automatically.
  */
 async function withSpan<T>(
-  parentCtx: Context,
   name: string,
   fn: () => Promise<T>,
 ): Promise<T> {
@@ -54,7 +54,7 @@ async function withSpan<T>(
   return tracer.startActiveSpan(
     name,
     { kind: SpanKind.INTERNAL },
-    parentCtx,
+    context.active(),
     async (span) => {
       try {
         return await fn();
@@ -72,10 +72,7 @@ async function withSpan<T>(
   );
 }
 
-function tracedDo(
-  target: WorkflowStep,
-  parentCtx: Context,
-): WorkflowStep["do"] {
+function tracedDo(target: WorkflowStep): WorkflowStep["do"] {
   return (async (
     name: string,
     configOrCallback: WorkflowStepConfig | (() => Promise<unknown>),
@@ -86,7 +83,7 @@ function tracedDo(
         ? [undefined, configOrCallback]
         : [configOrCallback, maybeCallback!];
 
-    return withSpan(parentCtx, name, () =>
+    return withSpan(name, () =>
       config !== undefined
         ? target.do(name, config, callback)
         : target.do(name, callback),
@@ -94,48 +91,34 @@ function tracedDo(
   }) as WorkflowStep["do"];
 }
 
-function tracedSleep(
-  target: WorkflowStep,
-  parentCtx: Context,
-): WorkflowStep["sleep"] {
+function tracedSleep(target: WorkflowStep): WorkflowStep["sleep"] {
   return async (name: string, duration: string) =>
-    withSpan(parentCtx, name, () => target.sleep(name, duration));
+    withSpan(name, () => target.sleep(name, duration));
 }
 
-function tracedSleepUntil(
-  target: WorkflowStep,
-  parentCtx: Context,
-): WorkflowStep["sleepUntil"] {
+function tracedSleepUntil(target: WorkflowStep): WorkflowStep["sleepUntil"] {
   return async (name: string, timestamp: Date | string) =>
-    withSpan(parentCtx, name, () => target.sleepUntil(name, timestamp));
+    withSpan(name, () => target.sleepUntil(name, timestamp));
 }
 
 /**
  * Create a traced step Proxy that intercepts `do`, `sleep`, and `sleepUntil`
- * to create OpenTelemetry spans as children of `parentCtx`.
+ * to create OpenTelemetry spans as children of the current active context.
+ * Nested step calls automatically become children of the outer step's span.
  * Unknown methods/properties pass through to the original step.
  *
  * @internal
  */
-function createTracedStep(
-  step: WorkflowStep,
-  parentCtx: Context,
-): WorkflowStep {
-  const methodCache = new Map<string | symbol, unknown>();
+function createTracedStep(step: WorkflowStep): WorkflowStep {
+  const wrappedDo = tracedDo(step);
+  const wrappedSleep = tracedSleep(step);
+  const wrappedSleepUntil = tracedSleepUntil(step);
 
   return new Proxy(step, {
     get(target, prop, receiver) {
-      if (prop === "do" || prop === "sleep" || prop === "sleepUntil") {
-        let cached = methodCache.get(prop);
-        if (!cached) {
-          if (prop === "do") cached = tracedDo(target, parentCtx);
-          else if (prop === "sleep")
-            cached = tracedSleep(target, parentCtx);
-          else cached = tracedSleepUntil(target, parentCtx);
-          methodCache.set(prop, cached);
-        }
-        return cached;
-      }
+      if (prop === "do") return wrappedDo;
+      if (prop === "sleep") return wrappedSleep;
+      if (prop === "sleepUntil") return wrappedSleepUntil;
       return Reflect.get(target, prop, receiver);
     },
   });
@@ -173,7 +156,7 @@ async function resolveParentContext(
  * 2. Auto-extract `__traceparent` from `event.payload` for cross-workflow propagation
  * 3. Create a root `workflow.run` span wrapping the entire execution
  * 4. Wrap the `step` object with traced versions of `do`, `sleep`, and `sleepUntil`
- *    as children of the root span
+ *    — nested step calls automatically become children of the outer step's span
  *
  * @param opts - SDK configuration. `env` falls back to `this.env` from WorkflowEntrypoint at runtime.
  * @returns A TC39 class decorator.
@@ -219,7 +202,7 @@ export function instrumentWorkflow(opts: InstrumentWorkflowOptions = {}) {
       // Resolve trace context (persists via __traceparent step)
       const parentCtx = await resolveParentContext(step, traceparent);
 
-      // Root span — step spans are children of this
+      // Root span — step spans are children via context.active()
       const tracer = trace.getTracer("workflow");
       return tracer.startActiveSpan(
         "workflow.run",
@@ -227,8 +210,7 @@ export function instrumentWorkflow(opts: InstrumentWorkflowOptions = {}) {
         parentCtx,
         async (rootSpan) => {
           try {
-            const runCtx = trace.setSpan(parentCtx, rootSpan);
-            const tracedStep = createTracedStep(step, runCtx);
+            const tracedStep = createTracedStep(step);
             return await originalRun.call(this, event, tracedStep);
           } catch (error) {
             rootSpan.setStatus({
