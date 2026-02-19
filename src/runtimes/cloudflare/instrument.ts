@@ -1,17 +1,15 @@
 import {
-  context,
   SpanKind,
   SpanStatusCode,
   trace,
   type Span,
 } from "@opentelemetry/api";
-import type { SDKConfig, SDKResult } from "../types.js";
-import { initSDK } from "../sdk.js";
+import type { SDKConfig, SDKResult } from "../../types.js";
+import { initSDK } from "../../sdk.js";
 
 // Minimal CF types to avoid @cloudflare/workers-types dependency
 interface ExecutionContext {
   waitUntil(promise: Promise<unknown>): void;
-  passThroughOnException(): void;
 }
 
 interface ScheduledController {
@@ -64,8 +62,13 @@ interface ExportedHandler<Env = unknown> {
   queue?: QueueHandler<Env>;
 }
 
+/**
+ * Configuration for {@link instrument}. Extends {@link SDKConfig} (minus `runtime`)
+ * with the Cloudflare Worker handler to wrap.
+ */
 export interface InstrumentConfig<Env = unknown>
   extends Omit<SDKConfig, "runtime"> {
+  /** The original Cloudflare Worker `ExportedHandler` to instrument. */
   handler: ExportedHandler<Env>;
 }
 
@@ -83,6 +86,29 @@ function flush(): Promise<void> {
   return sdkResult.forceFlush();
 }
 
+/**
+ * Wrap a Cloudflare Worker handler with OpenTelemetry instrumentation.
+ *
+ * Each incoming `fetch`, `scheduled`, or `queue` event is traced as a span.
+ * Spans are flushed via `ctx.waitUntil` so they don't block the response.
+ *
+ * @param config - Worker handler and SDK configuration.
+ * @returns A new `ExportedHandler` that traces every event.
+ *
+ * @example
+ * ```ts
+ * import { instrument } from "@howezt/telemetry";
+ *
+ * export default instrument({
+ *   serviceName: "my-worker",
+ *   handler: {
+ *     async fetch(request, env, ctx) {
+ *       return new Response("Hello");
+ *     },
+ *   },
+ * });
+ * ```
+ */
 export function instrument<Env = unknown>(
   config: InstrumentConfig<Env>,
 ): ExportedHandler<Env> {
@@ -225,7 +251,10 @@ export function instrument<Env = unknown>(
   return result;
 }
 
-/** Reset internal SDK state (for testing) */
+/**
+ * Reset internal SDK state (for testing).
+ * @internal
+ */
 export function _resetInstrumentState(): void {
   sdkResult = null;
 }

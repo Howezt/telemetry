@@ -24,8 +24,6 @@ export const nodeAdapter: RuntimeAdapter = {
       ...config.resourceAttributes,
     });
 
-    const provider = new NodeTracerProvider({ resource });
-
     const traceExporter = new OTLPTraceExporter({
       url: config.exporterEndpoint,
       headers: config.exporterHeaders,
@@ -36,7 +34,10 @@ export const nodeAdapter: RuntimeAdapter = {
         ? SimpleSpanProcessor
         : BatchSpanProcessor;
 
-    provider.addSpanProcessor(new Processor(traceExporter));
+    const provider = new NodeTracerProvider({
+      resource,
+      spanProcessors: [new Processor(traceExporter)],
+    });
     provider.register();
 
     let meterProvider: MeterProvider | undefined;

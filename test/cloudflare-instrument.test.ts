@@ -30,7 +30,7 @@ vi.mock("@opentelemetry/api", async () => {
     ...actual,
     trace: {
       getTracer: () => ({
-        startActiveSpan: (_name: string, _opts: unknown, fn: Function) =>
+        startActiveSpan: (_name: string, _opts: unknown, fn: (...args: unknown[]) => unknown) =>
           fn(mockSpanFns),
       }),
     },
@@ -40,7 +40,7 @@ vi.mock("@opentelemetry/api", async () => {
 import {
   instrument,
   _resetInstrumentState,
-} from "../src/runtimes/cloudflare-instrument.js";
+} from "../src/runtimes/cloudflare/instrument.js";
 import { initSDK } from "../src/sdk.js";
 
 function createMockCtx() {

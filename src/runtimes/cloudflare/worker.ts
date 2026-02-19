@@ -1,5 +1,4 @@
 import {
-  context,
   metrics,
   propagation,
   trace,
@@ -22,8 +21,8 @@ import {
   SimpleSpanProcessor,
 } from "@opentelemetry/sdk-trace-base";
 import { ATTR_SERVICE_NAME } from "@opentelemetry/semantic-conventions";
-import { detectCloudflareWorker } from "../detect.js";
-import type { RuntimeAdapter, SDKConfig, SDKResult } from "../types.js";
+import { detectCloudflareWorker } from "../../detect.js";
+import type { RuntimeAdapter, SDKConfig, SDKResult } from "../../types.js";
 
 export const cloudflareWorkerAdapter: RuntimeAdapter = {
   name: "cloudflare-worker",
@@ -34,14 +33,15 @@ export const cloudflareWorkerAdapter: RuntimeAdapter = {
       ...config.resourceAttributes,
     });
 
-    const provider = new BasicTracerProvider({ resource });
-
     const traceExporter = new OTLPTraceExporter({
       url: config.exporterEndpoint,
       headers: config.exporterHeaders,
     });
 
-    provider.addSpanProcessor(new SimpleSpanProcessor(traceExporter));
+    const provider = new BasicTracerProvider({
+      resource,
+      spanProcessors: [new SimpleSpanProcessor(traceExporter)],
+    });
 
     // Manually register global provider and propagator for CF Workers
     trace.setGlobalTracerProvider(provider as unknown as TracerProvider);

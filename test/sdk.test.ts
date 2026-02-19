@@ -17,7 +17,7 @@ import { initSDK } from "../src/sdk.js";
 import { resolve } from "../src/registry.js";
 
 // Access the mock setup function through the module
-const { __mockSetup: mockSetup } = await import("../src/registry.js") as any;
+const { __mockSetup: mockSetup } = await import("../src/registry.js") as Record<string, unknown>;
 
 describe("initSDK", () => {
   beforeEach(() => {

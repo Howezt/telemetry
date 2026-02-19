@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 
 // We need to test the registry in isolation, so we mock the built-in adapters
 vi.mock("../src/runtimes/node.js", () => ({
@@ -9,7 +9,7 @@ vi.mock("../src/runtimes/node.js", () => ({
   },
 }));
 
-vi.mock("../src/runtimes/cloudflare-worker.js", () => ({
+vi.mock("../src/runtimes/cloudflare/worker.js", () => ({
   cloudflareWorkerAdapter: {
     name: "cloudflare-worker",
     detect: () => false,
@@ -63,7 +63,7 @@ describe("registry", () => {
   });
 
   it("auto-detects custom adapter when it returns true", async () => {
-    const { register, resolve } = await import("../src/registry.js");
+    const { resolve } = await import("../src/registry.js");
     // The previously registered custom adapter has detect() = true
     // and is last in the list after CF (false) and Node (false)
     const resolved = resolve();
