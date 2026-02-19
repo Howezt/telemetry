@@ -99,6 +99,11 @@ function resolveParentContext(parent?: Span | string) {
  * The span is automatically named from the function (or caller location) unless
  * overridden via `opts.name`. Errors are recorded on the span and re-thrown.
  *
+ * **Cloudflare Workers caveat:** `performance.now()` only advances after I/O
+ * in Workers (Spectre mitigation). Spans wrapping **pure CPU work** (no `fetch`,
+ * KV, R2, D1, etc.) will report a duration of **0 ms**. Use `withTrace` for
+ * operations that involve at least one I/O call.
+ *
  * @param fn - The function to trace. Receives the active {@link Span} as its argument.
  * @param opts - Optional tracing configuration.
  * @returns The return value of `fn` (or a `Promise` thereof).

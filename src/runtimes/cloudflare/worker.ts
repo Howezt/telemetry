@@ -1,3 +1,27 @@
+// Patch perf_hooks for Cloudflare Workers.
+//
+// CF Workers polyfill `perf_hooks` with empty objects ({}) but
+// `@opentelemetry/core` imports `performance` from `perf_hooks` and reads
+// `timeOrigin` / `now()`.  Without this patch, `sdk-logs` crashes with
+// "Cannot convert object to primitive value" (opentelemetry-js#5500).
+//
+// We import the same module so we get the same object reference that
+// `@opentelemetry/core` holds in `otperformance`.  Mutating it here
+// makes the fix visible everywhere.  In Node.js `timeOrigin` is already
+// a number, so the guard makes this a no-op.
+import { performance as _perfHooksPerf } from "perf_hooks";
+
+const _perf = _perfHooksPerf as unknown as Record<string, unknown>;
+if (_perf && typeof _perf.timeOrigin !== "number") {
+  const _gp = globalThis.performance;
+  if (_gp) {
+    _perf.timeOrigin = _gp.timeOrigin;
+    if (typeof _perf.now !== "function") {
+      _perf.now = _gp.now.bind(_gp);
+    }
+  }
+}
+
 import {
   metrics,
   propagation,
