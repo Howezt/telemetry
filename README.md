@@ -6,6 +6,14 @@ The SDK **never throws** — on any failure it returns a noop result so your app
 
 ## Install
 
+This package is hosted on [GitHub Packages](https://github.com/Howezt/telemetry/packages). Configure the `@howezt` scope to point to the GitHub registry by adding an `.npmrc` file at your project root:
+
+```ini
+@howezt:registry=https://npm.pkg.github.com
+```
+
+Then install:
+
 ```bash
 pnpm add @howezt/telemetry
 ```
