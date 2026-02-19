@@ -237,10 +237,12 @@ describe("instrument", () => {
       const ctx = createMockCtx();
       await handler.fetch!(new Request("https://example.com/"), {}, ctx);
 
-      expect(initSDK).toHaveBeenCalledWith({
-        serviceName: "auto-init-test",
-        runtime: "cloudflare-worker",
-      });
+      expect(initSDK).toHaveBeenCalledWith(
+        expect.objectContaining({
+          serviceName: "auto-init-test",
+          runtime: "cloudflare-worker",
+        }),
+      );
     });
 
     it("does not re-initialize SDK on subsequent calls", async () => {

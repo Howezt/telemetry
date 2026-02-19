@@ -14,7 +14,7 @@ export type RuntimeName = "node" | "cloudflare-worker" | (string & {});
  */
 export interface SDKConfig {
   /** The logical name of the service reported in every span. */
-  serviceName: string;
+  serviceName?: string;
 
   /**
    * Explicit runtime to use. When omitted the SDK auto-detects

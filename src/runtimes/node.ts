@@ -3,7 +3,12 @@ import { logs } from "@opentelemetry/api-logs";
 import { OTLPLogExporter } from "@opentelemetry/exporter-logs-otlp-http";
 import { OTLPMetricExporter } from "@opentelemetry/exporter-metrics-otlp-http";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
-import { resourceFromAttributes } from "@opentelemetry/resources";
+import {
+  envDetector,
+  hostDetector,
+  osDetector,
+  processDetector,
+} from "@opentelemetry/resources";
 import { PeriodicExportingMetricReader } from "@opentelemetry/sdk-metrics";
 import { NodeSDK } from "@opentelemetry/sdk-node";
 import { BatchLogRecordProcessor } from "@opentelemetry/sdk-logs";
@@ -12,6 +17,7 @@ import { detectNode } from "../detect.js";
 import { resolveSignalEndpoint } from "../endpoints.js";
 import { createLogger } from "../logger.js";
 import { noopSDKResult } from "../noop.js";
+import { buildResource } from "../resource.js";
 import type { RuntimeAdapter, SDKConfig, SDKResult } from "../types.js";
 
 export const nodeAdapter: RuntimeAdapter = {
@@ -19,10 +25,14 @@ export const nodeAdapter: RuntimeAdapter = {
   detect: detectNode,
   setup(config: SDKConfig): SDKResult {
     try {
-      const resource = resourceFromAttributes({
-        [ATTR_SERVICE_NAME]: config.serviceName,
-        ...config.resourceAttributes,
-      });
+      const { resource, warnings } = buildResource(config, [
+        envDetector,
+        hostDetector,
+        processDetector,
+        osDetector,
+      ]);
+      const resolvedServiceName =
+        (resource.attributes[ATTR_SERVICE_NAME] as string) ?? "unknown";
 
       const tracesEndpoint = resolveSignalEndpoint("traces", config);
       const metricsEndpoint = resolveSignalEndpoint("metrics", config);
@@ -57,6 +67,7 @@ export const nodeAdapter: RuntimeAdapter = {
 
       const sdk = new NodeSDK({
         resource,
+        autoDetectResources: false,
         traceExporter,
         metricReader: metricReaders.length ? metricReaders[0] : undefined,
         logRecordProcessors,
@@ -65,7 +76,8 @@ export const nodeAdapter: RuntimeAdapter = {
 
       sdk.start();
 
-      const logger = createLogger(config.serviceName);
+      const logger = createLogger(resolvedServiceName);
+      for (const w of warnings) logger.warn(w);
 
       return {
         provider: trace.getTracerProvider(),

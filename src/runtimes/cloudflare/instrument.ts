@@ -93,9 +93,8 @@ function flush(): Promise<void> {
 /**
  * Options for {@link traceHandler}.
  */
-export interface TraceHandlerOptions {
-  /** Service name used to obtain a tracer. */
-  serviceName: string;
+export interface TraceHandlerOptions
+  extends Omit<SDKConfig, "runtime" | "instrumentations"> {
   /** The handler to call inside the traced span. */
   handler: () => Response | Promise<Response>;
   /** Optional callback invoked via `ctx.waitUntil` after the span ends. */
@@ -134,6 +133,7 @@ const headerSetter: TextMapSetter<Headers> = {
  * export async function handle({ event, resolve }) {
  *   return traceHandler(event.platform.ctx, event.request, {
  *     serviceName: "my-sveltekit-app",
+ *     env: event.platform.env,
  *     handler: () => resolve(event),
  *   });
  * }
@@ -144,7 +144,9 @@ export async function traceHandler(
   request: Request,
   opts: TraceHandlerOptions,
 ): Promise<Response> {
-  const tracer = trace.getTracer(opts.serviceName);
+  const { handler, onFlush, ...sdkOpts } = opts;
+  ensureSDK(sdkOpts);
+  const tracer = trace.getTracer(opts.serviceName ?? "unknown");
   const url = new URL(request.url);
   const extractedCtx = propagation.extract(
     context.active(),
@@ -168,7 +170,7 @@ export async function traceHandler(
       extractedCtx,
       async (s) => {
         span = s;
-        const res = await opts.handler();
+        const res = await handler();
         span.setAttribute("http.status_code", res.status);
         if (res.status >= 500) {
           span.setStatus({ code: SpanStatusCode.ERROR });
@@ -190,7 +192,7 @@ export async function traceHandler(
     throw error;
   } finally {
     span?.end();
-    ctx.waitUntil(opts.onFlush?.() ?? Promise.resolve());
+    ctx.waitUntil(onFlush?.() ?? Promise.resolve());
   }
 }
 
@@ -230,9 +232,10 @@ export function instrument<Env = unknown>(
       env: Env,
       ctx: ExecutionContext,
     ): Promise<Response> => {
-      ensureSDK(sdkConfig);
       return traceHandler(ctx, request, {
-        serviceName: sdkConfig.serviceName,
+        ...sdkConfig,
+        env: config.env || (env as Record<string, string | undefined>),
+        serviceName: sdkConfig.serviceName ?? "unknown",
         handler: () => originalFetch(request, env, ctx),
         onFlush: () => flush(),
       });
@@ -247,7 +250,7 @@ export function instrument<Env = unknown>(
       ctx: ExecutionContext,
     ): Promise<void> => {
       ensureSDK(sdkConfig);
-      const tracer = trace.getTracer(sdkConfig.serviceName);
+      const tracer = trace.getTracer(sdkConfig.serviceName ?? "unknown");
       let span: Span | undefined;
 
       try {
@@ -290,7 +293,7 @@ export function instrument<Env = unknown>(
       ctx: ExecutionContext,
     ): Promise<void> => {
       ensureSDK(sdkConfig);
-      const tracer = trace.getTracer(sdkConfig.serviceName);
+      const tracer = trace.getTracer(sdkConfig.serviceName ?? "unknown");
       let span: Span | undefined;
 
       try {
