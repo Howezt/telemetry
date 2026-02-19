@@ -74,14 +74,13 @@ async function withSpan<T>(
 
 function tracedDo(
   target: WorkflowStep,
-  parentCtxPromise: Promise<Context>,
+  parentCtx: Context,
 ): WorkflowStep["do"] {
   return (async (
     name: string,
     configOrCallback: WorkflowStepConfig | (() => Promise<unknown>),
     maybeCallback?: () => Promise<unknown>,
   ) => {
-    const parentCtx = await parentCtxPromise;
     const [config, callback] =
       typeof configOrCallback === "function"
         ? [undefined, configOrCallback]
@@ -97,53 +96,31 @@ function tracedDo(
 
 function tracedSleep(
   target: WorkflowStep,
-  parentCtxPromise: Promise<Context>,
+  parentCtx: Context,
 ): WorkflowStep["sleep"] {
-  return async (name: string, duration: string) => {
-    const parentCtx = await parentCtxPromise;
-    return withSpan(parentCtx, name, () => target.sleep(name, duration));
-  };
+  return async (name: string, duration: string) =>
+    withSpan(parentCtx, name, () => target.sleep(name, duration));
 }
 
 function tracedSleepUntil(
   target: WorkflowStep,
-  parentCtxPromise: Promise<Context>,
+  parentCtx: Context,
 ): WorkflowStep["sleepUntil"] {
-  return async (name: string, timestamp: Date | string) => {
-    const parentCtx = await parentCtxPromise;
-    return withSpan(parentCtx, name, () =>
-      target.sleepUntil(name, timestamp),
-    );
-  };
+  return async (name: string, timestamp: Date | string) =>
+    withSpan(parentCtx, name, () => target.sleepUntil(name, timestamp));
 }
 
 /**
  * Create a traced step Proxy that intercepts `do`, `sleep`, and `sleepUntil`
- * to create OpenTelemetry spans. Unknown methods/properties pass through to
- * the original step (forward-compatible with future CF API changes).
+ * to create OpenTelemetry spans as children of `parentCtx`.
+ * Unknown methods/properties pass through to the original step.
  *
  * @internal
  */
 function createTracedStep(
   step: WorkflowStep,
-  traceparent?: string,
+  parentCtx: Context,
 ): WorkflowStep {
-  const parentCtxPromise = (async () => {
-    let tp = traceparent;
-    if (!tp) {
-      const carrier: Record<string, string> = {};
-      propagation.inject(context.active(), carrier, objectSetter);
-      tp = carrier.traceparent ?? "";
-    }
-    const persisted: string = await step.do("__traceparent", () =>
-      Promise.resolve(tp!),
-    );
-    return persisted
-      ? propagation.extract(ROOT_CONTEXT, { traceparent: persisted })
-      : context.active();
-  })();
-
-  // Cache wrapped methods so the Proxy doesn't create new functions on every access
   const methodCache = new Map<string | symbol, unknown>();
 
   return new Proxy(step, {
@@ -151,10 +128,10 @@ function createTracedStep(
       if (prop === "do" || prop === "sleep" || prop === "sleepUntil") {
         let cached = methodCache.get(prop);
         if (!cached) {
-          if (prop === "do") cached = tracedDo(target, parentCtxPromise);
+          if (prop === "do") cached = tracedDo(target, parentCtx);
           else if (prop === "sleep")
-            cached = tracedSleep(target, parentCtxPromise);
-          else cached = tracedSleepUntil(target, parentCtxPromise);
+            cached = tracedSleep(target, parentCtx);
+          else cached = tracedSleepUntil(target, parentCtx);
           methodCache.set(prop, cached);
         }
         return cached;
@@ -165,6 +142,30 @@ function createTracedStep(
 }
 
 /**
+ * Resolve the parent trace context by persisting/recovering the traceparent
+ * via a `__traceparent` step (survives workflow hibernation).
+ *
+ * @internal
+ */
+async function resolveParentContext(
+  step: WorkflowStep,
+  traceparent?: string,
+): Promise<Context> {
+  let tp = traceparent;
+  if (!tp) {
+    const carrier: Record<string, string> = {};
+    propagation.inject(context.active(), carrier, objectSetter);
+    tp = carrier.traceparent ?? "";
+  }
+  const persisted: string = await step.do("__traceparent", () =>
+    Promise.resolve(tp!),
+  );
+  return persisted
+    ? propagation.extract(ROOT_CONTEXT, { traceparent: persisted })
+    : context.active();
+}
+
+/**
  * TC39 class decorator that instruments a Cloudflare Workflow with OpenTelemetry tracing.
  *
  * Intercepts the `run` method to:
@@ -172,6 +173,7 @@ function createTracedStep(
  * 2. Auto-extract `__traceparent` from `event.payload` for cross-workflow propagation
  * 3. Create a root `workflow.run` span wrapping the entire execution
  * 4. Wrap the `step` object with traced versions of `do`, `sleep`, and `sleepUntil`
+ *    as children of the root span
  *
  * @param opts - SDK configuration. `env` falls back to `this.env` from WorkflowEntrypoint at runtime.
  * @returns A TC39 class decorator.
@@ -213,31 +215,31 @@ export function instrumentWorkflow(opts: InstrumentWorkflowOptions = {}) {
       }
 
       ensureSDK(sdkOpts);
-      const tracedStep = createTracedStep(step, traceparent);
 
-      // Root span wrapping the entire workflow run
+      // Resolve trace context (persists via __traceparent step)
+      const parentCtx = await resolveParentContext(step, traceparent);
+
+      // Root span — step spans are children of this
       const tracer = trace.getTracer("workflow");
-      const rootCtx = traceparent
-        ? propagation.extract(ROOT_CONTEXT, { traceparent })
-        : context.active();
-
       return tracer.startActiveSpan(
         "workflow.run",
         { kind: SpanKind.INTERNAL },
-        rootCtx,
-        async (span) => {
+        parentCtx,
+        async (rootSpan) => {
           try {
+            const runCtx = trace.setSpan(parentCtx, rootSpan);
+            const tracedStep = createTracedStep(step, runCtx);
             return await originalRun.call(this, event, tracedStep);
           } catch (error) {
-            span.setStatus({
+            rootSpan.setStatus({
               code: SpanStatusCode.ERROR,
               message:
                 error instanceof Error ? error.message : String(error),
             });
-            span.recordException(error as Error);
+            rootSpan.recordException(error as Error);
             throw error;
           } finally {
-            span.end();
+            rootSpan.end();
           }
         },
       );

@@ -13,11 +13,12 @@ vi.mock("../src/sdk.js", () => ({
 }));
 
 // Hoist all variables referenced inside vi.mock factories
-const { mockExtract, mockInject, mockSpans, createMockSpan } = vi.hoisted(
-  () => {
+const { mockExtract, mockInject, mockSetSpan, mockSpans, createMockSpan } =
+  vi.hoisted(() => {
     type MockSpan = {
       name: string;
       opts: Record<string, unknown>;
+      parentCtx: unknown;
       setAttribute: ReturnType<typeof vi.fn>;
       setStatus: ReturnType<typeof vi.fn>;
       recordException: ReturnType<typeof vi.fn>;
@@ -47,11 +48,15 @@ const { mockExtract, mockInject, mockSpans, createMockSpan } = vi.hoisted(
           }
         },
       ),
+      mockSetSpan: vi.fn(
+        (ctx: unknown, span: unknown) => ({ ...Object(ctx), __span: span }),
+      ),
       mockSpans: spans,
       createMockSpan: () => {
         const span: MockSpan = {
           name: "",
           opts: {},
+          parentCtx: undefined,
           setAttribute: vi.fn(),
           setStatus: vi.fn(),
           recordException: vi.fn(),
@@ -61,8 +66,7 @@ const { mockExtract, mockInject, mockSpans, createMockSpan } = vi.hoisted(
         return span;
       },
     };
-  },
-);
+  });
 
 vi.mock("@opentelemetry/api", async () => {
   const actual = await vi.importActual("@opentelemetry/api");
@@ -89,9 +93,11 @@ vi.mock("@opentelemetry/api", async () => {
           const span = createMockSpan();
           span.name = name;
           span.opts = opts as Record<string, unknown>;
+          span.parentCtx = typeof ctx === "function" ? undefined : ctx;
           return (callback as (...args: unknown[]) => unknown)(span);
         },
       }),
+      setSpan: mockSetSpan,
     },
   };
 });
@@ -416,6 +422,36 @@ describe("instrumentWorkflow", () => {
       expect.objectContaining({ kind: SpanKind.INTERNAL }),
     );
     expect(rootSpan!.end).toHaveBeenCalled();
+  });
+
+  it("step spans are children of workflow.run span", async () => {
+    const step = createMockStep();
+
+    class TestWorkflow {
+      env = {};
+      async run(_event: unknown, step: Record<string, unknown>) {
+        await step.do("child-step", async () => "ok");
+      }
+    }
+
+    const Decorated = applyDecorator(TestWorkflow, { serviceName: "wf" });
+    const instance = new Decorated();
+    await instance.run({ payload: {} }, step);
+
+    const rootSpan = mockSpans.find((s) => s.name === "workflow.run");
+    const childSpan = mockSpans.find((s) => s.name === "child-step");
+    expect(rootSpan).toBeDefined();
+    expect(childSpan).toBeDefined();
+
+    // trace.setSpan was called with (parentCtx, rootSpan) to create runCtx
+    expect(mockSetSpan).toHaveBeenCalledWith(
+      expect.anything(),
+      rootSpan,
+    );
+
+    // child-step's parentCtx should be the runCtx (output of trace.setSpan)
+    const runCtx = mockSetSpan.mock.results[0]?.value;
+    expect(childSpan!.parentCtx).toBe(runCtx);
   });
 
   it("root span records error when run() throws", async () => {
