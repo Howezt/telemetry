@@ -13,8 +13,8 @@
 
 export { initSDK } from "./sdk.js";
 export { register, resolve, getRegisteredAdapters } from "./registry.js";
-export { instrument } from "./runtimes/cloudflare/instrument.js";
-export type { InstrumentConfig } from "./runtimes/cloudflare/instrument.js";
+export { instrument, traceHandler } from "./runtimes/cloudflare/instrument.js";
+export type { InstrumentConfig, TraceHandlerOptions } from "./runtimes/cloudflare/instrument.js";
 export { withTrace } from "./with-trace.js";
 export type { WithTraceOptions } from "./with-trace.js";
 export { traced } from "./traced.js";

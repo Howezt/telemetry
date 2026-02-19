@@ -1,8 +1,12 @@
 import {
+  context,
+  propagation,
   SpanKind,
   SpanStatusCode,
   trace,
   type Span,
+  type TextMapGetter,
+  type TextMapSetter,
 } from "@opentelemetry/api";
 import type { SDKConfig, SDKResult } from "../../types.js";
 import { initSDK } from "../../sdk.js";
@@ -87,6 +91,110 @@ function flush(): Promise<void> {
 }
 
 /**
+ * Options for {@link traceHandler}.
+ */
+export interface TraceHandlerOptions {
+  /** Service name used to obtain a tracer. */
+  serviceName: string;
+  /** The handler to call inside the traced span. */
+  handler: () => Response | Promise<Response>;
+  /** Optional callback invoked via `ctx.waitUntil` after the span ends. */
+  onFlush?: () => Promise<void>;
+}
+
+const headerGetter: TextMapGetter<Headers> = {
+  keys(carrier) {
+    return [...carrier.keys()];
+  },
+  get(carrier, key) {
+    return carrier.get(key) ?? undefined;
+  },
+};
+
+const headerSetter: TextMapSetter<Headers> = {
+  set(carrier, key, value) {
+    carrier.set(key, value);
+  },
+};
+
+/**
+ * Trace a single fetch-style request.
+ *
+ * Creates a `SERVER` span, propagates incoming W3C trace context
+ * (`traceparent`/`tracestate`) from `request` headers, and injects
+ * trace context into the response headers.
+ *
+ * Use this directly in frameworks (e.g. SvelteKit hooks) that provide
+ * `Request` + `ExecutionContext` but not the full `ExportedHandler` pattern.
+ *
+ * @example
+ * ```ts
+ * import { traceHandler } from "@howezt/telemetry";
+ *
+ * export async function handle({ event, resolve }) {
+ *   return traceHandler(event.platform.ctx, event.request, {
+ *     serviceName: "my-sveltekit-app",
+ *     handler: () => resolve(event),
+ *   });
+ * }
+ * ```
+ */
+export async function traceHandler(
+  ctx: ExecutionContext,
+  request: Request,
+  opts: TraceHandlerOptions,
+): Promise<Response> {
+  const tracer = trace.getTracer(opts.serviceName);
+  const url = new URL(request.url);
+  const extractedCtx = propagation.extract(
+    context.active(),
+    request.headers,
+    headerGetter,
+  );
+  let span: Span | undefined;
+
+  try {
+    const response = await tracer.startActiveSpan(
+      `${request.method} ${url.pathname}`,
+      {
+        kind: SpanKind.SERVER,
+        attributes: {
+          "http.method": request.method,
+          "http.url": request.url,
+          "http.target": url.pathname + url.search,
+          "http.host": url.host,
+        },
+      },
+      extractedCtx,
+      async (s) => {
+        span = s;
+        const res = await opts.handler();
+        span.setAttribute("http.status_code", res.status);
+        if (res.status >= 500) {
+          span.setStatus({ code: SpanStatusCode.ERROR });
+        }
+        return res;
+      },
+    );
+
+    // Inject trace context into response headers
+    const newResponse = new Response(response.body, response);
+    propagation.inject(context.active(), newResponse.headers, headerSetter);
+    return newResponse;
+  } catch (error) {
+    span?.setStatus({
+      code: SpanStatusCode.ERROR,
+      message: error instanceof Error ? error.message : String(error),
+    });
+    span?.recordException(error as Error);
+    throw error;
+  } finally {
+    span?.end();
+    ctx.waitUntil(opts.onFlush?.() ?? Promise.resolve());
+  }
+}
+
+/**
  * Wrap a Cloudflare Worker handler with OpenTelemetry instrumentation.
  *
  * Each incoming `fetch`, `scheduled`, or `queue` event is traced as a span.
@@ -123,43 +231,11 @@ export function instrument<Env = unknown>(
       ctx: ExecutionContext,
     ): Promise<Response> => {
       ensureSDK(sdkConfig);
-      const tracer = trace.getTracer(sdkConfig.serviceName);
-      const url = new URL(request.url);
-      let span: Span | undefined;
-
-      try {
-        return await tracer.startActiveSpan(
-          `${request.method} ${url.pathname}`,
-          {
-            kind: SpanKind.SERVER,
-            attributes: {
-              "http.method": request.method,
-              "http.url": request.url,
-              "http.target": url.pathname + url.search,
-              "http.host": url.host,
-            },
-          },
-          async (s) => {
-            span = s;
-            const response = await originalFetch(request, env, ctx);
-            span.setAttribute("http.status_code", response.status);
-            if (response.status >= 500) {
-              span.setStatus({ code: SpanStatusCode.ERROR });
-            }
-            return response;
-          },
-        );
-      } catch (error) {
-        span?.setStatus({
-          code: SpanStatusCode.ERROR,
-          message: error instanceof Error ? error.message : String(error),
-        });
-        span?.recordException(error as Error);
-        throw error;
-      } finally {
-        span?.end();
-        ctx.waitUntil(flush());
-      }
+      return traceHandler(ctx, request, {
+        serviceName: sdkConfig.serviceName,
+        handler: () => originalFetch(request, env, ctx),
+        onFlush: () => flush(),
+      });
     };
   }
 

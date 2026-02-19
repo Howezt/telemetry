@@ -23,16 +23,42 @@ const mockSpanFns = {
   setStatus: vi.fn(),
   recordException: vi.fn(),
   end: vi.fn(),
+  spanContext: vi.fn().mockReturnValue({
+    traceId: "0af7651916cd43dd8448eb211c80319c",
+    spanId: "b7ad6b7169203331",
+    traceFlags: 1,
+  }),
 };
+
+const { mockExtract, mockInject } = vi.hoisted(() => ({
+  mockExtract: vi.fn((_ctx: unknown, _carrier: unknown, _getter?: unknown) => ({})),
+  mockInject: vi.fn(),
+}));
 
 vi.mock("@opentelemetry/api", async () => {
   const actual = await vi.importActual("@opentelemetry/api");
   return {
     ...actual,
+    context: {
+      ...(actual as Record<string, unknown>).context,
+      active: () => ({}),
+    },
+    propagation: {
+      extract: mockExtract,
+      inject: mockInject,
+    },
     trace: {
       getTracer: () => ({
-        startActiveSpan: (_name: string, _opts: unknown, fn: (...args: unknown[]) => unknown) =>
-          fn(mockSpanFns),
+        startActiveSpan: (
+          _name: string,
+          _opts: unknown,
+          _ctx: unknown,
+          fn?: (...args: unknown[]) => unknown,
+        ) => {
+          // Support both 3-arg (name, opts, fn) and 4-arg (name, opts, ctx, fn) overloads
+          const callback = typeof _ctx === "function" ? _ctx : fn;
+          return (callback as (...args: unknown[]) => unknown)(mockSpanFns);
+        },
       }),
     },
   };
@@ -40,6 +66,7 @@ vi.mock("@opentelemetry/api", async () => {
 
 import {
   instrument,
+  traceHandler,
   _resetInstrumentState,
 } from "../src/runtimes/cloudflare/instrument.js";
 import { initSDK } from "../src/sdk.js";
@@ -274,5 +301,135 @@ describe("instrument", () => {
       await ctx.waitUntil.mock.calls[0][0];
       expect(mockForceFlush).toHaveBeenCalled();
     });
+  });
+});
+
+describe("traceHandler", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("creates span with HTTP attributes from request", async () => {
+    const ctx = createMockCtx();
+    const request = new Request("https://example.com/api/test?q=1");
+
+    await traceHandler(ctx, request, {
+      serviceName: "test-service",
+      handler: () => new Response("ok"),
+    });
+
+    expect(mockSpanFns.setAttribute).toHaveBeenCalledWith(
+      "http.status_code",
+      200,
+    );
+    expect(mockSpanFns.end).toHaveBeenCalled();
+  });
+
+  it("sets error status on 5xx response", async () => {
+    const ctx = createMockCtx();
+    const request = new Request("https://example.com/");
+
+    await traceHandler(ctx, request, {
+      serviceName: "test-service",
+      handler: () => new Response("error", { status: 503 }),
+    });
+
+    expect(mockSpanFns.setStatus).toHaveBeenCalledWith({
+      code: SpanStatusCode.ERROR,
+    });
+  });
+
+  it("records exception on thrown error", async () => {
+    const ctx = createMockCtx();
+    const request = new Request("https://example.com/");
+    const error = new Error("handler failed");
+
+    await expect(
+      traceHandler(ctx, request, {
+        serviceName: "test-service",
+        handler: () => {
+          throw error;
+        },
+      }),
+    ).rejects.toThrow("handler failed");
+
+    expect(mockSpanFns.setStatus).toHaveBeenCalledWith({
+      code: SpanStatusCode.ERROR,
+      message: "handler failed",
+    });
+    expect(mockSpanFns.recordException).toHaveBeenCalledWith(error);
+    expect(mockSpanFns.end).toHaveBeenCalled();
+  });
+
+  it("calls ctx.waitUntil with onFlush", async () => {
+    const ctx = createMockCtx();
+    const onFlush = vi.fn().mockResolvedValue(undefined);
+
+    await traceHandler(ctx, new Request("https://example.com/"), {
+      serviceName: "test-service",
+      handler: () => new Response("ok"),
+      onFlush,
+    });
+
+    expect(ctx.waitUntil).toHaveBeenCalled();
+    await ctx.waitUntil.mock.calls[0][0];
+    expect(onFlush).toHaveBeenCalled();
+  });
+
+  it("works without onFlush (no crash)", async () => {
+    const ctx = createMockCtx();
+
+    const response = await traceHandler(
+      ctx,
+      new Request("https://example.com/"),
+      {
+        serviceName: "test-service",
+        handler: () => new Response("ok"),
+      },
+    );
+
+    expect(response).toBeInstanceOf(Response);
+    expect(ctx.waitUntil).toHaveBeenCalled();
+  });
+
+  it("extracts trace context from request headers", async () => {
+    const ctx = createMockCtx();
+    const request = new Request("https://example.com/", {
+      headers: {
+        traceparent: "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+        tracestate: "congo=t61rcWkgMzE",
+      },
+    });
+
+    await traceHandler(ctx, request, {
+      serviceName: "test-service",
+      handler: () => new Response("ok"),
+    });
+
+    expect(mockExtract).toHaveBeenCalledWith(
+      expect.anything(),
+      request.headers,
+      expect.objectContaining({
+        keys: expect.any(Function),
+        get: expect.any(Function),
+      }),
+    );
+  });
+
+  it("injects trace context into response headers", async () => {
+    const ctx = createMockCtx();
+
+    await traceHandler(ctx, new Request("https://example.com/"), {
+      serviceName: "test-service",
+      handler: () => new Response("ok"),
+    });
+
+    expect(mockInject).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.any(Headers),
+      expect.objectContaining({
+        set: expect.any(Function),
+      }),
+    );
   });
 });
