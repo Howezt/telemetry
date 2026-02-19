@@ -4,14 +4,17 @@ import {
   trace,
   type TracerProvider,
 } from "@opentelemetry/api";
+import { logs } from "@opentelemetry/api-logs";
 import {
   CompositePropagator,
   W3CBaggagePropagator,
   W3CTraceContextPropagator,
 } from "@opentelemetry/core";
+import { OTLPLogExporter } from "@opentelemetry/exporter-logs-otlp-http";
 import { OTLPMetricExporter } from "@opentelemetry/exporter-metrics-otlp-http";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
 import { resourceFromAttributes } from "@opentelemetry/resources";
+import { LoggerProvider, SimpleLogRecordProcessor } from "@opentelemetry/sdk-logs";
 import {
   MeterProvider,
   PeriodicExportingMetricReader,
@@ -22,70 +25,120 @@ import {
 } from "@opentelemetry/sdk-trace-base";
 import { ATTR_SERVICE_NAME } from "@opentelemetry/semantic-conventions";
 import { detectCloudflareWorker } from "../../detect.js";
+import { resolveSignalEndpoint } from "../../endpoints.js";
+import { createLogger } from "../../logger.js";
+import { noopSDKResult } from "../../noop.js";
 import type { RuntimeAdapter, SDKConfig, SDKResult } from "../../types.js";
 
 export const cloudflareWorkerAdapter: RuntimeAdapter = {
   name: "cloudflare-worker",
   detect: detectCloudflareWorker,
   setup(config: SDKConfig): SDKResult {
-    const resource = resourceFromAttributes({
-      [ATTR_SERVICE_NAME]: config.serviceName,
-      ...config.resourceAttributes,
-    });
-
-    const traceExporter = new OTLPTraceExporter({
-      url: config.exporterEndpoint,
-      headers: config.exporterHeaders,
-    });
-
-    const provider = new BasicTracerProvider({
-      resource,
-      spanProcessors: [new SimpleSpanProcessor(traceExporter)],
-    });
-
-    // Manually register global provider and propagator for CF Workers
-    trace.setGlobalTracerProvider(provider as unknown as TracerProvider);
-    propagation.setGlobalPropagator(
-      new CompositePropagator({
-        propagators: [
-          new W3CTraceContextPropagator(),
-          new W3CBaggagePropagator(),
-        ],
-      }),
-    );
-
-    let meterProvider: MeterProvider | undefined;
-
-    if (config.enableMetrics) {
-      const metricExporter = new OTLPMetricExporter({
-        url: config.metricsExporterEndpoint,
-        headers: config.exporterHeaders,
+    try {
+      const resource = resourceFromAttributes({
+        [ATTR_SERVICE_NAME]: config.serviceName,
+        ...config.resourceAttributes,
       });
 
-      const metricReader = new PeriodicExportingMetricReader({
-        exporter: metricExporter,
-        exportIntervalMillis: 2_147_483_647, // Disable periodic; rely on manual flush via ctx.waitUntil
-      });
+      const tracesEndpoint = resolveSignalEndpoint("traces", config);
+      const metricsEndpoint = resolveSignalEndpoint("metrics", config);
+      const logsEndpoint = resolveSignalEndpoint("logs", config);
 
-      meterProvider = new MeterProvider({
-        resource,
-        readers: [metricReader],
-      });
+      // Trace provider (only if endpoint resolves)
+      let provider: BasicTracerProvider | undefined;
+      if (tracesEndpoint) {
+        const traceExporter = new OTLPTraceExporter({
+          url: tracesEndpoint,
+          headers: config.exporterHeaders,
+        });
 
-      metrics.setGlobalMeterProvider(meterProvider);
+        provider = new BasicTracerProvider({
+          resource,
+          spanProcessors: [new SimpleSpanProcessor(traceExporter)],
+        });
+
+        trace.setGlobalTracerProvider(provider as unknown as TracerProvider);
+      }
+
+      // Propagators are always set for context propagation
+      propagation.setGlobalPropagator(
+        new CompositePropagator({
+          propagators: [
+            new W3CTraceContextPropagator(),
+            new W3CBaggagePropagator(),
+          ],
+        }),
+      );
+
+      // Meter provider (only if endpoint resolves)
+      let meterProvider: MeterProvider | undefined;
+      if (metricsEndpoint) {
+        const metricExporter = new OTLPMetricExporter({
+          url: metricsEndpoint,
+          headers: config.exporterHeaders,
+        });
+
+        const metricReader = new PeriodicExportingMetricReader({
+          exporter: metricExporter,
+          exportIntervalMillis: 2_147_483_647, // Disable periodic; rely on manual flush via ctx.waitUntil
+        });
+
+        meterProvider = new MeterProvider({
+          resource,
+          readers: [metricReader],
+        });
+
+        metrics.setGlobalMeterProvider(meterProvider);
+      }
+
+      // Logger provider (only if endpoint resolves)
+      let loggerProvider: LoggerProvider | undefined;
+      if (logsEndpoint) {
+        const logExporter = new OTLPLogExporter({
+          url: logsEndpoint,
+          headers: config.exporterHeaders,
+        });
+
+        loggerProvider = new LoggerProvider({
+          resource,
+          processors: [new SimpleLogRecordProcessor(logExporter)],
+        });
+
+        logs.setGlobalLoggerProvider(loggerProvider);
+      }
+
+      const logger = createLogger(config.serviceName);
+
+      return {
+        provider: provider
+          ? (provider as unknown as TracerProvider)
+          : trace.getTracerProvider(),
+        meterProvider,
+        loggerProvider,
+        logger,
+        async shutdown() {
+          try {
+            await provider?.shutdown();
+            await meterProvider?.shutdown();
+            await loggerProvider?.shutdown();
+          } catch {
+            // Never throw
+          }
+        },
+        async forceFlush() {
+          try {
+            await provider?.forceFlush();
+            await meterProvider?.forceFlush();
+            await loggerProvider?.forceFlush();
+          } catch (err) {
+            logger.warn("forceFlush failed", {
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+        },
+      };
+    } catch {
+      return noopSDKResult();
     }
-
-    return {
-      provider: provider as unknown as TracerProvider,
-      meterProvider,
-      async shutdown() {
-        await provider.shutdown();
-        await meterProvider?.shutdown();
-      },
-      async forceFlush() {
-        await provider.forceFlush();
-        await meterProvider?.forceFlush();
-      },
-    };
   },
 };

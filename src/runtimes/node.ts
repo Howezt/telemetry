@@ -1,77 +1,104 @@
-import { metrics } from "@opentelemetry/api";
+import { metrics, trace } from "@opentelemetry/api";
+import { logs } from "@opentelemetry/api-logs";
+import { OTLPLogExporter } from "@opentelemetry/exporter-logs-otlp-http";
 import { OTLPMetricExporter } from "@opentelemetry/exporter-metrics-otlp-http";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
 import { resourceFromAttributes } from "@opentelemetry/resources";
-import {
-  MeterProvider,
-  PeriodicExportingMetricReader,
-} from "@opentelemetry/sdk-metrics";
-import {
-  BatchSpanProcessor,
-  SimpleSpanProcessor,
-} from "@opentelemetry/sdk-trace-base";
-import { NodeTracerProvider } from "@opentelemetry/sdk-trace-node";
+import { PeriodicExportingMetricReader } from "@opentelemetry/sdk-metrics";
+import { NodeSDK } from "@opentelemetry/sdk-node";
+import { BatchLogRecordProcessor } from "@opentelemetry/sdk-logs";
 import { ATTR_SERVICE_NAME } from "@opentelemetry/semantic-conventions";
 import { detectNode } from "../detect.js";
+import { resolveSignalEndpoint } from "../endpoints.js";
+import { createLogger } from "../logger.js";
+import { noopSDKResult } from "../noop.js";
 import type { RuntimeAdapter, SDKConfig, SDKResult } from "../types.js";
 
 export const nodeAdapter: RuntimeAdapter = {
   name: "node",
   detect: detectNode,
   setup(config: SDKConfig): SDKResult {
-    const resource = resourceFromAttributes({
-      [ATTR_SERVICE_NAME]: config.serviceName,
-      ...config.resourceAttributes,
-    });
-
-    const traceExporter = new OTLPTraceExporter({
-      url: config.exporterEndpoint,
-      headers: config.exporterHeaders,
-    });
-
-    const Processor =
-      config.spanProcessorType === "simple"
-        ? SimpleSpanProcessor
-        : BatchSpanProcessor;
-
-    const provider = new NodeTracerProvider({
-      resource,
-      spanProcessors: [new Processor(traceExporter)],
-    });
-    provider.register();
-
-    let meterProvider: MeterProvider | undefined;
-
-    if (config.enableMetrics) {
-      const metricExporter = new OTLPMetricExporter({
-        url: config.metricsExporterEndpoint,
-        headers: config.exporterHeaders,
+    try {
+      const resource = resourceFromAttributes({
+        [ATTR_SERVICE_NAME]: config.serviceName,
+        ...config.resourceAttributes,
       });
 
-      const metricReader = new PeriodicExportingMetricReader({
-        exporter: metricExporter,
-        exportIntervalMillis: config.metricsExportIntervalMs ?? 60_000,
-      });
+      const tracesEndpoint = resolveSignalEndpoint("traces", config);
+      const metricsEndpoint = resolveSignalEndpoint("metrics", config);
+      const logsEndpoint = resolveSignalEndpoint("logs", config);
 
-      meterProvider = new MeterProvider({
+      const traceExporter = tracesEndpoint
+        ? new OTLPTraceExporter({ url: tracesEndpoint, headers: config.exporterHeaders })
+        : undefined;
+
+      const metricReaders = metricsEndpoint
+        ? [
+            new PeriodicExportingMetricReader({
+              exporter: new OTLPMetricExporter({
+                url: metricsEndpoint,
+                headers: config.exporterHeaders,
+              }),
+              exportIntervalMillis: config.metricsExportIntervalMs ?? 60_000,
+            }),
+          ]
+        : [];
+
+      const logRecordProcessors = logsEndpoint
+        ? [
+            new BatchLogRecordProcessor(
+              new OTLPLogExporter({
+                url: logsEndpoint,
+                headers: config.exporterHeaders,
+              }),
+            ),
+          ]
+        : [];
+
+      const sdk = new NodeSDK({
         resource,
-        readers: [metricReader],
+        traceExporter,
+        metricReader: metricReaders.length ? metricReaders[0] : undefined,
+        logRecordProcessors,
+        instrumentations: (config.instrumentations ?? []) as never[],
       });
 
-      metrics.setGlobalMeterProvider(meterProvider);
-    }
+      sdk.start();
 
-    return {
-      provider,
-      meterProvider,
-      async shutdown() {
-        await provider.shutdown();
-        await meterProvider?.shutdown();
-      },
-      async forceFlush() {
-        await provider.forceFlush();
-        await meterProvider?.forceFlush();
-      },
-    };
+      const logger = createLogger(config.serviceName);
+
+      return {
+        provider: trace.getTracerProvider(),
+        meterProvider: metricsEndpoint ? metrics.getMeterProvider() : undefined,
+        loggerProvider: logsEndpoint ? logs.getLoggerProvider() : undefined,
+        logger,
+        async shutdown() {
+          try {
+            await sdk.shutdown();
+          } catch {
+            // Never throw
+          }
+        },
+        async forceFlush() {
+          try {
+            // NodeSDK doesn't expose forceFlush — flush via global providers
+            const tp = trace.getTracerProvider() as { forceFlush?: () => Promise<void> };
+            const mp = metrics.getMeterProvider() as { forceFlush?: () => Promise<void> };
+            const lp = logs.getLoggerProvider() as { forceFlush?: () => Promise<void> };
+            await Promise.all([
+              tp.forceFlush?.(),
+              mp.forceFlush?.(),
+              lp.forceFlush?.(),
+            ]);
+          } catch (err) {
+            logger.warn("forceFlush failed", {
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+        },
+      };
+    } catch {
+      return noopSDKResult();
+    }
   },
 };

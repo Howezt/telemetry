@@ -19,11 +19,19 @@ export { withTrace } from "./with-trace.js";
 export type { WithTraceOptions } from "./with-trace.js";
 export { traced } from "./traced.js";
 export type { TracedInput, TracedCallContext } from "./traced.js";
+export { resolveSignalEndpoint, normalizeEndpoint } from "./endpoints.js";
+export { createLogger } from "./logger.js";
+export { noopSDKResult, noopLogger } from "./noop.js";
 export type {
   RuntimeName,
   SDKConfig,
   RuntimeAdapter,
   SDKResult,
+  Logger,
+  LogAttributes,
+  LogOptions,
+  LogLevel,
+  OtlpSignal,
 } from "./types.js";
 
 // Metrics API re-exports

@@ -1,6 +1,13 @@
 import type { RuntimeAdapter, RuntimeName } from "./types.js";
+import { noopSDKResult } from "./noop.js";
 import { nodeAdapter } from "./runtimes/node.js";
 import { cloudflareWorkerAdapter } from "./runtimes/cloudflare/worker.js";
+
+const noopAdapter: RuntimeAdapter = {
+  name: "noop",
+  detect: () => false,
+  setup: () => noopSDKResult(),
+};
 
 const adapters: RuntimeAdapter[] = [];
 
@@ -29,18 +36,16 @@ export function register(adapter: RuntimeAdapter): void {
 /**
  * Resolve a {@link RuntimeAdapter} by name or by auto-detection.
  *
+ * Returns a noop adapter if no adapter matches (never throws).
+ *
  * @param runtimeName - Explicit runtime name. When omitted, each registered adapter's
  *   `detect()` method is called in order and the first match is returned.
- * @returns The matched adapter.
- * @throws If no adapter matches.
+ * @returns The matched adapter, or a noop adapter if none matches.
  */
 export function resolve(runtimeName?: RuntimeName): RuntimeAdapter {
   if (runtimeName) {
     const adapter = adapters.find((a) => a.name === runtimeName);
-    if (!adapter) {
-      throw new Error(`No adapter registered for runtime: ${runtimeName}`);
-    }
-    return adapter;
+    return adapter ?? noopAdapter;
   }
 
   for (const adapter of adapters) {
@@ -49,9 +54,7 @@ export function resolve(runtimeName?: RuntimeName): RuntimeAdapter {
     }
   }
 
-  throw new Error(
-    "Could not detect runtime. Provide an explicit runtime in config or register a custom adapter.",
-  );
+  return noopAdapter;
 }
 
 /**

@@ -10,6 +10,7 @@ vi.mock("../src/sdk.js", () => {
     initSDK: vi.fn().mockReturnValue({
       provider: {},
       meterProvider: {},
+      logger: { debug() {}, info() {}, warn() {}, error() {} },
       shutdown: vi.fn().mockResolvedValue(undefined),
       forceFlush: mockForceFlush,
     }),
@@ -257,10 +258,10 @@ describe("instrument", () => {
       expect(waitUntilArg).toBeInstanceOf(Promise);
     });
 
-    it("forceFlush is called on each request (flushes traces and metrics)", async () => {
+    it("forceFlush is called on each request", async () => {
       const handler = instrument({
         serviceName: "test-service",
-        enableMetrics: true,
+        exporterEndpoint: "https://otel.example.com",
         handler: { fetch: vi.fn().mockResolvedValue(new Response("ok")) },
       });
 

@@ -17,10 +17,17 @@ vi.mock("../src/runtimes/cloudflare/worker.js", () => ({
   },
 }));
 
-describe("registry", () => {
-  // Re-import for each test to get fresh module state
-  // Note: since vi.mock is hoisted, the mocked adapters are used
+// Mock noop module
+vi.mock("../src/noop.js", () => ({
+  noopSDKResult: () => ({
+    provider: {},
+    logger: { debug() {}, info() {}, warn() {}, error() {} },
+    async shutdown() {},
+    async forceFlush() {},
+  }),
+}));
 
+describe("registry", () => {
   it("resolves adapter by explicit name", async () => {
     const { resolve } = await import("../src/registry.js");
     const adapter = resolve("node");
@@ -33,17 +40,27 @@ describe("registry", () => {
     expect(adapter.name).toBe("cloudflare-worker");
   });
 
-  it("throws when no adapter matches the given name", async () => {
+  it("returns noop adapter when no adapter matches the given name", async () => {
     const { resolve } = await import("../src/registry.js");
-    expect(() => resolve("unknown-runtime")).toThrow(
-      "No adapter registered for runtime: unknown-runtime",
-    );
+    const adapter = resolve("unknown-runtime");
+    expect(adapter.name).toBe("noop");
   });
 
-  it("throws when no runtime is detected and none specified", async () => {
+  it("returns noop adapter when no runtime is detected and none specified", async () => {
     const { resolve } = await import("../src/registry.js");
     // Both mocked adapters return detect() = false
-    expect(() => resolve()).toThrow("Could not detect runtime");
+    const adapter = resolve();
+    expect(adapter.name).toBe("noop");
+  });
+
+  it("noop adapter setup returns a valid SDKResult", async () => {
+    const { resolve } = await import("../src/registry.js");
+    const adapter = resolve("unknown-runtime");
+    const result = adapter.setup({ serviceName: "test" });
+    expect(result).toHaveProperty("provider");
+    expect(result).toHaveProperty("logger");
+    expect(result).toHaveProperty("shutdown");
+    expect(result).toHaveProperty("forceFlush");
   });
 
   it("registers and resolves a custom adapter", async () => {
@@ -53,7 +70,9 @@ describe("registry", () => {
       detect: () => true,
       setup: vi.fn().mockReturnValue({
         provider: {},
+        logger: { debug() {}, info() {}, warn() {}, error() {} },
         shutdown: vi.fn(),
+        forceFlush: vi.fn(),
       }),
     };
 
