@@ -18,6 +18,14 @@ Then install:
 pnpm add @howezt/telemetry
 ```
 
+On Node.js (or compatible runtimes like Bun), install [pino](https://github.com/pinojs/pino) for structured JSON logging to stderr:
+
+```bash
+pnpm add pino
+```
+
+Pino is an optional peer dependency — the SDK falls back to a built-in formatter if pino is not installed.
+
 ## Quick Start — Node.js
 
 ```ts
@@ -102,12 +110,6 @@ logger.debug("cache miss", { key: "user:123" }, { timestamp: Date.now() });
 ```
 
 Log-trace correlation is automatic — `traceId` and `spanId` from the active span are included in every log record.
-
-Pino is an optional peer dependency for structured JSON logging on Node.js:
-
-```bash
-pnpm add pino
-```
 
 ## Metrics
 
