@@ -396,6 +396,99 @@ describe("instrumentWorkflow", () => {
     expect(result.hasWaitForEvent).toBe("function");
   });
 
+  it("creates a root workflow.run span wrapping the entire run", async () => {
+    const step = createMockStep();
+
+    class TestWorkflow {
+      env = {};
+      async run(_event: unknown, step: Record<string, unknown>) {
+        await step.do("step-a", async () => "a");
+      }
+    }
+
+    const Decorated = applyDecorator(TestWorkflow, { serviceName: "wf" });
+    const instance = new Decorated();
+    await instance.run({ payload: {} }, step);
+
+    const rootSpan = mockSpans.find((s) => s.name === "workflow.run");
+    expect(rootSpan).toBeDefined();
+    expect(rootSpan!.opts).toEqual(
+      expect.objectContaining({ kind: SpanKind.INTERNAL }),
+    );
+    expect(rootSpan!.end).toHaveBeenCalled();
+  });
+
+  it("root span records error when run() throws", async () => {
+    const step = createMockStep();
+    step.do.mockImplementation(
+      (
+        name: string,
+        configOrCallback: unknown,
+        maybeCallback?: () => Promise<unknown>,
+      ) => {
+        if (name === "__traceparent") {
+          return (configOrCallback as () => Promise<unknown>)();
+        }
+        const callback =
+          typeof configOrCallback === "function"
+            ? configOrCallback
+            : maybeCallback;
+        return (callback as () => Promise<unknown>)();
+      },
+    );
+
+    const error = new Error("run crashed");
+
+    class TestWorkflow {
+      env = {};
+      async run(_event: unknown, _step: Record<string, unknown>) {
+        throw error;
+      }
+    }
+
+    const Decorated = applyDecorator(TestWorkflow, { serviceName: "wf" });
+    const instance = new Decorated();
+
+    await expect(instance.run({ payload: {} }, step)).rejects.toThrow(
+      "run crashed",
+    );
+
+    const rootSpan = mockSpans.find((s) => s.name === "workflow.run");
+    expect(rootSpan).toBeDefined();
+    expect(rootSpan!.setStatus).toHaveBeenCalledWith({
+      code: SpanStatusCode.ERROR,
+      message: "run crashed",
+    });
+    expect(rootSpan!.recordException).toHaveBeenCalledWith(error);
+    expect(rootSpan!.end).toHaveBeenCalled();
+  });
+
+  it("caches wrapped step methods across accesses", async () => {
+    const step = createMockStep();
+    let doRef1: unknown;
+    let doRef2: unknown;
+    let sleepRef1: unknown;
+    let sleepRef2: unknown;
+
+    class TestWorkflow {
+      env = {};
+      async run(_event: unknown, step: Record<string, unknown>) {
+        doRef1 = step.do;
+        doRef2 = step.do;
+        sleepRef1 = step.sleep;
+        sleepRef2 = step.sleep;
+        await (step.do as CallableFunction)("test", async () => "ok");
+      }
+    }
+
+    const Decorated = applyDecorator(TestWorkflow, { serviceName: "wf" });
+    const instance = new Decorated();
+    await instance.run({ payload: {} }, step);
+
+    expect(doRef1).toBe(doRef2);
+    expect(sleepRef1).toBe(sleepRef2);
+  });
+
   it("uses opts.env when provided, falls back to this.env", async () => {
     const step = createMockStep();
     const optsEnv = { CUSTOM_KEY: "from-opts" };

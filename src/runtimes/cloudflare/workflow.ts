@@ -42,6 +42,36 @@ export type InstrumentWorkflowOptions = Omit<
   "runtime" | "instrumentations"
 >;
 
+/**
+ * Run `fn` inside a new span, recording errors and ending the span automatically.
+ */
+async function withSpan<T>(
+  parentCtx: Context,
+  name: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const tracer = trace.getTracer("workflow");
+  return tracer.startActiveSpan(
+    name,
+    { kind: SpanKind.INTERNAL },
+    parentCtx,
+    async (span) => {
+      try {
+        return await fn();
+      } catch (error) {
+        span.setStatus({
+          code: SpanStatusCode.ERROR,
+          message: error instanceof Error ? error.message : String(error),
+        });
+        span.recordException(error as Error);
+        throw error;
+      } finally {
+        span.end();
+      }
+    },
+  );
+}
+
 function tracedDo(
   target: WorkflowStep,
   parentCtxPromise: Promise<Context>,
@@ -52,34 +82,15 @@ function tracedDo(
     maybeCallback?: () => Promise<unknown>,
   ) => {
     const parentCtx = await parentCtxPromise;
-    const tracer = trace.getTracer("workflow");
     const [config, callback] =
       typeof configOrCallback === "function"
         ? [undefined, configOrCallback]
         : [configOrCallback, maybeCallback!];
 
-    return tracer.startActiveSpan(
-      name,
-      { kind: SpanKind.INTERNAL },
-      parentCtx,
-      async (span) => {
-        try {
-          const result =
-            config !== undefined
-              ? await target.do(name, config, callback)
-              : await target.do(name, callback);
-          return result;
-        } catch (error) {
-          span.setStatus({
-            code: SpanStatusCode.ERROR,
-            message: error instanceof Error ? error.message : String(error),
-          });
-          span.recordException(error as Error);
-          throw error;
-        } finally {
-          span.end();
-        }
-      },
+    return withSpan(parentCtx, name, () =>
+      config !== undefined
+        ? target.do(name, config, callback)
+        : target.do(name, callback),
     );
   }) as WorkflowStep["do"];
 }
@@ -90,27 +101,7 @@ function tracedSleep(
 ): WorkflowStep["sleep"] {
   return async (name: string, duration: string) => {
     const parentCtx = await parentCtxPromise;
-    const tracer = trace.getTracer("workflow");
-
-    return tracer.startActiveSpan(
-      name,
-      { kind: SpanKind.INTERNAL },
-      parentCtx,
-      async (span) => {
-        try {
-          await target.sleep(name, duration);
-        } catch (error) {
-          span.setStatus({
-            code: SpanStatusCode.ERROR,
-            message: error instanceof Error ? error.message : String(error),
-          });
-          span.recordException(error as Error);
-          throw error;
-        } finally {
-          span.end();
-        }
-      },
-    );
+    return withSpan(parentCtx, name, () => target.sleep(name, duration));
   };
 }
 
@@ -120,26 +111,8 @@ function tracedSleepUntil(
 ): WorkflowStep["sleepUntil"] {
   return async (name: string, timestamp: Date | string) => {
     const parentCtx = await parentCtxPromise;
-    const tracer = trace.getTracer("workflow");
-
-    return tracer.startActiveSpan(
-      name,
-      { kind: SpanKind.INTERNAL },
-      parentCtx,
-      async (span) => {
-        try {
-          await target.sleepUntil(name, timestamp);
-        } catch (error) {
-          span.setStatus({
-            code: SpanStatusCode.ERROR,
-            message: error instanceof Error ? error.message : String(error),
-          });
-          span.recordException(error as Error);
-          throw error;
-        } finally {
-          span.end();
-        }
-      },
+    return withSpan(parentCtx, name, () =>
+      target.sleepUntil(name, timestamp),
     );
   };
 }
@@ -170,12 +143,22 @@ function createTracedStep(
       : context.active();
   })();
 
+  // Cache wrapped methods so the Proxy doesn't create new functions on every access
+  const methodCache = new Map<string | symbol, unknown>();
+
   return new Proxy(step, {
     get(target, prop, receiver) {
-      if (prop === "do") return tracedDo(target, parentCtxPromise);
-      if (prop === "sleep") return tracedSleep(target, parentCtxPromise);
-      if (prop === "sleepUntil")
-        return tracedSleepUntil(target, parentCtxPromise);
+      if (prop === "do" || prop === "sleep" || prop === "sleepUntil") {
+        let cached = methodCache.get(prop);
+        if (!cached) {
+          if (prop === "do") cached = tracedDo(target, parentCtxPromise);
+          else if (prop === "sleep")
+            cached = tracedSleep(target, parentCtxPromise);
+          else cached = tracedSleepUntil(target, parentCtxPromise);
+          methodCache.set(prop, cached);
+        }
+        return cached;
+      }
       return Reflect.get(target, prop, receiver);
     },
   });
@@ -187,7 +170,8 @@ function createTracedStep(
  * Intercepts the `run` method to:
  * 1. Initialise the SDK (handles fresh isolates after hibernation)
  * 2. Auto-extract `__traceparent` from `event.payload` for cross-workflow propagation
- * 3. Wrap the `step` object with traced versions of `do`, `sleep`, and `sleepUntil`
+ * 3. Create a root `workflow.run` span wrapping the entire execution
+ * 4. Wrap the `step` object with traced versions of `do`, `sleep`, and `sleepUntil`
  *
  * @param opts - SDK configuration. `env` falls back to `this.env` from WorkflowEntrypoint at runtime.
  * @returns A TC39 class decorator.
@@ -230,7 +214,33 @@ export function instrumentWorkflow(opts: InstrumentWorkflowOptions = {}) {
 
       ensureSDK(sdkOpts);
       const tracedStep = createTracedStep(step, traceparent);
-      return originalRun.call(this, event, tracedStep);
+
+      // Root span wrapping the entire workflow run
+      const tracer = trace.getTracer("workflow");
+      const rootCtx = traceparent
+        ? propagation.extract(ROOT_CONTEXT, { traceparent })
+        : context.active();
+
+      return tracer.startActiveSpan(
+        "workflow.run",
+        { kind: SpanKind.INTERNAL },
+        rootCtx,
+        async (span) => {
+          try {
+            return await originalRun.call(this, event, tracedStep);
+          } catch (error) {
+            span.setStatus({
+              code: SpanStatusCode.ERROR,
+              message:
+                error instanceof Error ? error.message : String(error),
+            });
+            span.recordException(error as Error);
+            throw error;
+          } finally {
+            span.end();
+          }
+        },
+      );
     };
     return target;
   };
