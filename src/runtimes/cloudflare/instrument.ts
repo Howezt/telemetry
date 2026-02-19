@@ -78,7 +78,7 @@ export interface InstrumentConfig<Env = unknown>
 
 let sdkResult: SDKResult | null = null;
 
-function ensureSDK(config: Omit<SDKConfig, "runtime">): SDKResult {
+export function ensureSDK(config: Omit<SDKConfig, "runtime">): SDKResult {
   if (!sdkResult) {
     sdkResult = initSDK({ ...config, runtime: "cloudflare-worker" });
   }

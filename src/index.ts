@@ -15,6 +15,8 @@ export { initSDK } from "./sdk.js";
 export { register, resolve, getRegisteredAdapters } from "./registry.js";
 export { instrument, traceHandler } from "./runtimes/cloudflare/instrument.js";
 export type { InstrumentConfig, TraceHandlerOptions } from "./runtimes/cloudflare/instrument.js";
+export { instrumentWorkflow, injectTraceparent, extractTraceparent } from "./runtimes/cloudflare/workflow.js";
+export type { InstrumentWorkflowOptions } from "./runtimes/cloudflare/workflow.js";
 export { withTrace } from "./with-trace.js";
 export type { WithTraceOptions } from "./with-trace.js";
 export { traced } from "./traced.js";
