@@ -4,15 +4,11 @@ OpenTelemetry SDK setup abstraction for multiple runtimes. Initialise tracing, m
 
 The SDK **never throws** — on any failure it returns a noop result so your application keeps running.
 
+## API Reference
+
+Full auto-generated API docs are available on [GitHub Pages](https://howezt.github.io/monitoring/).
+
 ## Install
-
-This package is hosted on [GitHub Packages](https://github.com/Howezt/telemetry/packages). Configure the `@howezt` scope to point to the GitHub registry by adding an `.npmrc` file at your project root:
-
-```ini
-@howezt:registry=https://npm.pkg.github.com
-```
-
-Then install:
 
 ```bash
 pnpm add @howezt/telemetry
@@ -164,16 +160,6 @@ const denoAdapter: RuntimeAdapter = {
 register(denoAdapter);
 
 const sdk = initSDK({ serviceName: "deno-app" });
-```
-
-## API Reference
-
-Full auto-generated API docs are available on [GitHub Pages](https://howezt.github.io/monitoring/).
-
-Generate locally:
-
-```bash
-pnpm run docs:generate
 ```
 
 ## License
